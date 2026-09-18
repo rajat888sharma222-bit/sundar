@@ -2,6 +2,7 @@
 const { connectToDB } = require('../../../config/database');
 const logger = require('../../../utils/logger');
 const { sendErrorResponse, createError } = require('../../../middleware/error.handler');
+const cacheService = require('../../../utils/cache-service');
 
 /**
  * Get all categories
@@ -9,32 +10,39 @@ const { sendErrorResponse, createError } = require('../../../middleware/error.ha
  */
 const getAllCategories = async (req, res) => {
   try {
-    const db = await connectToDB();
-    const productsCollection = db.collection('products');
+    const cacheKey = 'categories:all:with_count';
+    
+    const categoriesWithCount = await cacheService.getCached(
+      cacheKey,
+      async () => {
+        const db = await connectToDB();
+        const productsCollection = db.collection('products');
 
-    // Use aggregation instead of distinct() which is not supported in MongoDB API v1
-    const categoriesWithCount = await productsCollection.aggregate([
-      {
-        $match: { active: { $ne: false } }
+        return await productsCollection.aggregate([
+          {
+            $match: { active: { $ne: false } }
+          },
+          {
+            $group: {
+              _id: "$category",
+              productCount: { $sum: 1 }
+            }
+          },
+          {
+            $project: {
+              _id: 0,
+              name: "$_id",
+              slug: { $toLower: { $replaceOne: { input: "$_id", find: " ", replacement: "-" } } },
+              productCount: 1
+            }
+          },
+          {
+            $sort: { productCount: -1 }
+          }
+        ]).toArray();
       },
-      {
-        $group: {
-          _id: "$category",
-          productCount: { $sum: 1 }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          name: "$_id",
-          slug: { $toLower: { $replaceOne: { input: "$_id", find: " ", replacement: "-" } } },
-          productCount: 1
-        }
-      },
-      {
-        $sort: { productCount: -1 }
-      }
-    ]).toArray();
+      { ttl: 3600 } // Cache for 1 hour
+    );
 
     return res.status(200).json({
       success: true,
@@ -57,34 +65,44 @@ const getProductsByCategory = async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
 
-    const db = await connectToDB();
-    const productsCollection = db.collection('products');
-    const skip = (page - 1) * limit;
+    const cacheKey = `categories:${category}:products:${page}:${limit}`;
 
-    const products = await productsCollection.find({
-      category: { $regex: new RegExp(`^${category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
-      active: { $ne: false }
-    })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .toArray();
+    const result = await cacheService.getCached(
+      cacheKey,
+      async () => {
+        const db = await connectToDB();
+        const productsCollection = db.collection('products');
+        const skip = (page - 1) * limit;
 
-    const total = await productsCollection.countDocuments({
-      category: { $regex: new RegExp(`^${category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
-      active: { $ne: false }
-    });
+        const regex = new RegExp(`^${category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+
+        const [products, total] = await Promise.all([
+          productsCollection.find({ category: regex, active: { $ne: false } })
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray(),
+          productsCollection.countDocuments({ category: regex, active: { $ne: false } })
+        ]);
+
+        return {
+          products: products.map(item => ({
+            ...item,
+            id: item._id ? item._id.toString() : item.id
+          })),
+          total
+        };
+      },
+      { ttl: 300 }
+    );
 
     return res.status(200).json({
       success: true,
-      data: products.map(item => ({
-        ...item,
-        id: item._id ? item._id.toString() : item.id
-      })),
+      data: result.products,
       pagination: {
         page,
         limit,
-        total
+        total: result.total
       }
     });
   } catch (error) {
