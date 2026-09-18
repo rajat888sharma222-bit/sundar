@@ -39,6 +39,7 @@ const ProductionProcess = () => {
   
   const { scrollYProgress } = useScroll({
     target: targetRef,
+    offset: ["start start", "end end"]
   });
 
   // Map vertical scroll progress to horizontal movement
