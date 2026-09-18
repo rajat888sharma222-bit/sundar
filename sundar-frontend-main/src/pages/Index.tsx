@@ -122,7 +122,7 @@ const Index = () => {
 
       <Navbar />
 
-      <main className="relative z-10 w-full overflow-x-hidden">
+      <main className="relative z-10 w-full">
         {/* Section 01 */}
         <HeroSection companyInfo={companyInfo} />
 
